@@ -1,0 +1,6 @@
+venv/
+*.pyc
+__pycache__/
+*.pcap
+*.log
+capture.jsonl
