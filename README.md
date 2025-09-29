@@ -93,6 +93,3 @@ Before running PktLens, you’ll need:
    - You can add an argument like `--iface eth0` to choose a specific one.  
 
 ---
-
-Do you want me to also drop the **first working version of pktlens.py** (step-by-step explained, not a messy script) so you can immediately test and commit it?
-
