@@ -21,18 +21,20 @@ Clone the repo:
 git clone https://github.com/your-username/PktLens.git
 cd PktLens
 Install dependencies:
+```
 
-bash
-Copy code
+```bash
 pip install -r requirements.txt
-⚙️ Configuration
+```
+
+## ⚙️ Configuration
 Make sure you run the script with root/administrator privileges
 
 On Linux/macOS:
 
-bash
-Copy code
+```bash
 sudo python pktlens.py
+```
 On Windows, run Command Prompt as Administrator
 
 You can also specify:
@@ -43,34 +45,33 @@ Packet count limit
 
 Output file (optional, for saving captured packets)
 
-🚀 Usage
+## 🚀 Usage
 Run:
 
-bash
-Copy code
+```bash
 python pktlens.py
+```
+
 Example output:
 
-yaml
-Copy code
+```yaml
 [+] Packet captured:
     Source IP: 192.168.1.5
     Destination IP: 142.250.72.14
     Protocol: TCP
     Payload: b'GET / HTTP/1.1...'
-🛠️ Roadmap
+```
+
+## 🛠️ Roadmap
 Add filtering (capture only TCP/UDP/ICMP)
 
 Save packets in .pcap format
 
 Simple GUI for beginners
 
-📚 Learning Goals
+## 📚 Learning Goals
 PktLens isn’t about replacing tools like Wireshark.
 It’s about learning how sniffers work under the hood, strengthening networking knowledge, and building a strong cybersecurity foundation.
-
-yaml
-Copy code
 
 ---
 
