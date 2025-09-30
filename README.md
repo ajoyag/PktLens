@@ -1,96 +1,120 @@
+Here’s a **professional, polished `README.md`** for your project repo `PktLens`. I’ve written it in a natural tone, making it look like a serious open-source tool, not a student experiment.
+
+---
+
+````markdown
 # PktLens
 
-PktLens is a beginner-friendly packet sniffer written in Python.  
-It captures and analyzes network traffic at a low level, helping you understand how data flows across networks.
+A lightweight packet sniffer built in Python with [Scapy](https://scapy.net/).  
+PktLens captures live network traffic, writes PCAPs for deep analysis, logs structured JSON for automation, and provides human-readable summaries in real time.
 
-## ✨ Features
-- Capture live packets using Python
-- View source/destination IP addresses and ports
-- Inspect packet payloads
-- Lightweight and easy to use
-- Great for learning networking and cybersecurity basics
+## Features
 
-## ⚡ Requirements
-- Python 3.8+
-- Administrator/root privileges (needed for raw socket access)
-- Works on Linux, macOS, and Windows
+- 🔎 Live packet capture from any interface
+- 📂 Save packets directly to PCAP (Wireshark compatible)
+- 📜 Stream structured logs in JSONL format
+- 👀 Human-readable per-packet summaries (protocols, ports, flags, HTTP requests)
+- ⏱️ Flexible stopping conditions: packet count, duration, or Ctrl+C
+- 📑 Rotating log file for capture history
+- 🛡️ Works on Linux/macOS (requires root privileges for sniffing)
 
-## 📦 Installation
-Clone the repo:
+---
+
+## Installation
+
+Clone the repo and install dependencies:
+
 ```bash
 git clone https://github.com/your-username/PktLens.git
 cd PktLens
-```
+pip3 install -r requirements.txt
+````
 
-Install dependencies:
-
-```bash
-pip install -r requirements.txt
-```
-
-## ⚙️ Configuration
-Make sure you run the script with root/administrator privileges
-
-On Linux/macOS:
+Or install Scapy directly:
 
 ```bash
-sudo python pktlens.py
+pip3 install scapy
 ```
-On Windows, run Command Prompt as Administrator
-
-You can also specify:
-
-Network interface to listen on
-
-Packet count limit
-
-Output file (optional, for saving captured packets)
-
-## 🚀 Usage
-Run:
-
-```bash
-python pktlens.py
-```
-
-Example output:
-
-```yaml
-[+] Packet captured:
-    Source IP: 192.168.1.5
-    Destination IP: 142.250.72.14
-    Protocol: TCP
-    Payload: b'GET / HTTP/1.1...'
-```
-
-## 🛠️ Roadmap
-Add filtering (capture only TCP/UDP/ICMP)
-
-Save packets in .pcap format
-
-Simple GUI for beginners
-
-## 📚 Learning Goals
-PktLens isn’t about replacing tools like Wireshark.
-It’s about learning how sniffers work under the hood, strengthening networking knowledge, and building a strong cybersecurity foundation.
 
 ---
 
-## 🔹 What to Configure  
+## Usage
 
-Before running PktLens, you’ll need:  
+Run PktLens with root privileges:
 
-1. **Python setup**  
-   - Make sure you’re running Python 3.8 or later.  
-   - Install `scapy` if we extend features later.  
+```bash
+sudo python3 pktlens.py --iface lo --duration 15 --pretty --pcap demo.pcap --jsonl demo.jsonl
+```
 
-2. **Privileges**  
-   - Packet sniffers require raw socket access.  
-   - On Linux/macOS: `sudo python pktlens.py`  
-   - On Windows: Run PowerShell/CMD as Admin.  
+### Common options
 
-3. **Network interface selection (optional)**  
-   - By default, it will sniff the default interface.  
-   - You can add an argument like `--iface eth0` to choose a specific one.  
+* `--iface` / `-i` : Interface to sniff (e.g. `eth0`, `wlan0`, `lo`)
+* `--filter` / `-f` : BPF filter string (e.g. `"tcp and port 80"`)
+* `--count` / `-c` : Stop after this many packets
+* `--duration` / `-t` : Stop after this many seconds
+* `--pcap` : Write packets to a `.pcap` file
+* `--jsonl` : Write packet summaries to JSONL
+* `--pretty` : Print human summaries to stdout
 
 ---
+
+## Example
+
+Start a capture on the loopback interface:
+
+```bash
+sudo python3 pktlens.py --iface lo --duration 20 --pretty --pcap traffic.pcap --jsonl traffic.jsonl
+```
+
+In another terminal:
+
+```bash
+python3 -m http.server 8000 &
+curl http://localhost:8000
+ping -c 3 8.8.8.8
+```
+
+You’ll see console output like:
+
+```
+[2025-09-30T12:01:15Z] TCP 127.0.0.1:39812 -> 127.0.0.1:8000 len=64 | flags=S
+[2025-09-30T12:01:15Z] HTTP: GET / HTTP/1.1
+[2025-09-30T12:01:17Z] ICMP 127.0.0.1 -> 8.8.8.8 len=32
+```
+
+Open `traffic.pcap` in Wireshark for full inspection, or process `traffic.jsonl` in any script.
+
+---
+
+## Requirements
+
+* Python 3.8+
+* [Scapy](https://scapy.net/)
+  Install via `pip3 install scapy`
+
+---
+
+## Project Structure
+
+```
+PktLens/
+├── pktlens.py          # Main sniffer script
+├── requirements.txt    # Python dependencies
+├── README.md           # Documentation
+├── LICENSE             # License (MIT, Apache 2.0, etc.)
+├── data/               # Optional sample PCAPs
+└── docs/               # Screenshots, extra docs
+```
+
+---
+
+## License
+
+MIT License — free to use, modify, and share. See [LICENSE](./LICENSE) for details.
+
+---
+
+## Disclaimer
+
+PktLens is intended for **educational and authorized security testing only**.
+Do not use it on networks you don’t own or have explicit permission to monitor.
