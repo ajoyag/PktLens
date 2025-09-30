@@ -1,3 +1,0 @@
-scapy
-python-dateutil
-pytest
