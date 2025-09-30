@@ -1,8 +1,3 @@
-Here’s a **professional, polished `README.md`** for your project repo `PktLens`. I’ve written it in a natural tone, making it look like a serious open-source tool, not a student experiment.
-
----
-
-````markdown
 # PktLens
 
 A lightweight packet sniffer built in Python with [Scapy](https://scapy.net/).  
