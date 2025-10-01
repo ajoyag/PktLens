@@ -1,4 +1,4 @@
-# PktLens - Advanced Packet Sniffer Dashboard
+# PktLens - Packet Sniffer Dashboard
 
 PktLens is a terminal-based, live-updating packet sniffer designed for **network monitoring, analysis, and security research**. It captures packets, displays real-time statistics, recent traffic, top talkers, domains, and generates alerts for suspicious activity.
 
