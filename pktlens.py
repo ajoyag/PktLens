@@ -1,296 +1,179 @@
 #!/usr/bin/env python3
-"""
-PktLens - single-file packet sniffer (ready-to-run)
-
-Features
-- Live packet capture (scapy/libpcap)
-- Streaming pcap writer (no big memory usage)
-- JSONL per-packet summaries
-- Human-readable stdout summaries
-- CLI args: iface, bpf filter, count, duration, pcap output, jsonl output
-- Graceful stop on SIGINT/SIGTERM or reached limits
-
-Usage (Linux/macOS):
-    sudo python3 pktlens.py --iface lo --duration 15 --pretty --pcap demo.pcap --jsonl demo.jsonl
-"""
+# pktlens.py
+# Live packet sniffer with stats, alerts, and recent packets (Bettercap-style)
 
 import argparse
-import json
-import logging
-import logging.handlers
-import signal
-import sys
+from collections import defaultdict, deque
+from datetime import datetime
 import time
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Optional, Dict, Any
+from scapy.all import sniff, IP, TCP, UDP, ICMP, DNS
+from rich.console import Console
+from rich.table import Table
+from rich.live import Live
+from rich.panel import Panel
+from rich.text import Text
 
-from scapy.all import (
-    sniff,
-    Ether,
-    IP,
-    IPv6,
-    TCP,
-    UDP,
-    ICMP,
-    Raw,
-)
-from scapy.utils import PcapWriter
+console = Console()
 
-# ---------- Globals ----------
-STOP = False
-PACKETS_WRITTEN = 0
-START_TIME = None
+# Store packets and metrics
+stats = defaultdict(int)
+recent_packets = deque(maxlen=15)
+alerts = deque(maxlen=5)
+unique_src = set()
+unique_dst = set()
+start_time = time.time()
 
-# ---------- Signal handling ----------
-def _on_signal(signum, frame):
-    global STOP
-    STOP = True
-    logging.getLogger().info("Signal received: stopping capture...")
 
-signal.signal(signal.SIGINT, _on_signal)
-signal.signal(signal.SIGTERM, _on_signal)
+# ---------- ALERT RULES ----------
+def check_alerts(pkt, window_data, thresholds):
+    now = time.time()
+    src_ip = pkt[IP].src if IP in pkt else None
 
-# ---------- Utilities ----------
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    # Clean old entries (sliding window)
+    for k, times in list(window_data.items()):
+        window_data[k] = [t for t in times if now - t <= thresholds["window"]]
 
-def tcp_flags_to_str(tcp_layer: TCP) -> str:
-    try:
-        return str(tcp_layer.flags)
-    except Exception:
-        return ""
+    # DNS NXDOMAIN (rcode=3)
+    if pkt.haslayer(DNS) and pkt[DNS].qr == 1 and pkt[DNS].rcode == 3:
+        window_data[f"dns_nxdomain:{src_ip}"].append(now)
+        if len(window_data[f"dns_nxdomain:{src_ip}"]) >= thresholds["dns_nxdomain"]:
+            alerts.append(("[red bold][HIGH][/red bold] DNS NXDOMAIN Spike",
+                           f"Source: {src_ip}\nCount: {len(window_data[f'dns_nxdomain:{src_ip}'])} NXDOMAIN in last {thresholds['window']}s\nAction: Check misconfig or suspicious domains"))
 
-def safe_decode(payload: bytes, max_len: int = 512) -> str:
-    try:
-        txt = payload.decode("utf-8", errors="replace")
-    except Exception:
-        txt = str(payload[:max_len])
-    return txt if len(txt) <= max_len else txt[:max_len] + "..."
+    # ICMP flood
+    if pkt.haslayer(ICMP) and pkt[ICMP].type == 8:  # echo-request
+        window_data[f"icmp_flood:{src_ip}"].append(now)
+        if len(window_data[f"icmp_flood:{src_ip}"]) >= thresholds["icmp_flood"]:
+            alerts.append(("[yellow][MEDIUM][/yellow] ICMP Flood Attempt",
+                           f"Source: {src_ip}\nPackets in last {thresholds['window']}s: {len(window_data[f'icmp_flood:{src_ip}'])}\nAction: Investigate DoS attempt"))
 
-# ---------- Packet parsing ----------
-def parse_pkt(pkt) -> Dict[str, Any]:
-    """
-    Returns a dict summary for JSONL and printing.
-    """
-    summary = {
-        "timestamp": now_iso(),
-        "eth_src": None,
-        "eth_dst": None,
-        "eth_type": None,
-        "ip_version": None,
-        "ip_src": None,
-        "ip_dst": None,
-        "protocol": None,
-        "src_port": None,
-        "dst_port": None,
-        "tcp_flags": None,
-        "payload_len": 0,
-        "http": None,
+    # TCP RST spike
+    if pkt.haslayer(TCP) and pkt[TCP].flags == "R":
+        window_data[f"tcp_rst:{src_ip}"].append(now)
+        if len(window_data[f"tcp_rst:{src_ip}"]) >= thresholds["tcp_rst"]:
+            alerts.append(("[yellow][MEDIUM][/yellow] TCP Reset Spike",
+                           f"Source: {src_ip}\nCount: {len(window_data[f'tcp_rst:{src_ip}'])}\nAction: Possible scan or broken sessions"))
+
+    # SYN flood detection
+    if pkt.haslayer(TCP) and pkt[TCP].flags == "S":
+        window_data[f"tcp_syn:{src_ip}"].append(now)
+        if len(window_data[f"tcp_syn:{src_ip}"]) >= thresholds["tcp_syn"]:
+            alerts.append(("[red bold][HIGH][/red bold] SYN Flood Suspicion",
+                           f"Source: {src_ip}\nSYN packets in last {thresholds['window']}s: {len(window_data[f'tcp_syn:{src_ip}'])}\nAction: Check for flood attack"))
+
+
+# ---------- PACKET HANDLER ----------
+def process_packet(pkt, window_data, thresholds):
+    global stats, recent_packets, unique_src, unique_dst
+
+    stats["total"] += 1
+    proto = "OTHER"
+
+    if IP in pkt:
+        src, dst = pkt[IP].src, pkt[IP].dst
+        unique_src.add(src)
+        unique_dst.add(dst)
+    else:
+        src, dst = "-", "-"
+
+    if TCP in pkt:
+        proto = "TCP"
+        stats["tcp"] += 1
+    elif UDP in pkt:
+        proto = "UDP"
+        stats["udp"] += 1
+    elif ICMP in pkt:
+        proto = "ICMP"
+        stats["icmp"] += 1
+    else:
+        stats["other"] += 1
+
+    # store packet in recent
+    recent_packets.appendleft({
+        "time": datetime.now().strftime("%H:%M:%S.%f")[:-3],
+        "proto": proto,
+        "src": src,
+        "dst": dst,
+        "len": len(pkt)
+    })
+
+    # run alerts
+    check_alerts(pkt, window_data, thresholds)
+
+
+# ---------- RENDERING ----------
+def render_layout():
+    # Stats Panel
+    elapsed = time.time() - start_time
+    throughput = (stats["total"] * 64 * 8 / elapsed / 1e6) if elapsed > 0 else 0
+    stats_text = Text()
+    stats_text.append(f"Total Packets: {stats['total']}\n", style="bold cyan")
+    stats_text.append(f"TCP: {stats['tcp']} | UDP: {stats['udp']} | ICMP: {stats['icmp']} | Other: {stats['other']}\n", style="green")
+    stats_text.append(f"Throughput: {throughput:.2f} Mbps\n", style="yellow")
+    stats_text.append(f"Unique Sources: {len(unique_src)} | Unique Destinations: {len(unique_dst)}", style="magenta")
+    stats_panel = Panel(stats_text, title="Stats", border_style="cyan")
+
+    # Alerts Panel
+    if alerts:
+        alert_text = Text()
+        for title, detail in list(alerts)[-3:]:
+            alert_text.append(f"{title}\n", style="bold")
+            alert_text.append(f"  {detail}\n\n", style="white")
+        alerts_panel = Panel(alert_text, title="Alerts", border_style="red")
+    else:
+        alerts_panel = Panel(Text("No active alerts", style="green"), title="Alerts", border_style="red")
+
+    # Recent Packets Table
+    pkt_table = Table(title="Recent Packets", expand=True, box=None, show_lines=True)
+    pkt_table.add_column("Time", style="cyan")
+    pkt_table.add_column("Proto")
+    pkt_table.add_column("Source")
+    pkt_table.add_column("Destination")
+    pkt_table.add_column("Len", justify="right")
+
+    proto_colors = {"TCP": "blue", "UDP": "cyan", "ICMP": "yellow", "DNS": "green", "TLS": "magenta"}
+
+    for pkt in list(recent_packets):
+        proto_style = proto_colors.get(pkt["proto"], "white")
+        pkt_table.add_row(pkt["time"],
+                          f"[{proto_style}]{pkt['proto']}[/{proto_style}]",
+                          pkt["src"], pkt["dst"], str(pkt["len"]))
+
+    return Panel(stats_panel.renderable, title="PktLens", border_style="bright_white"), alerts_panel, pkt_table
+
+
+# ---------- MAIN ----------
+def main():
+    parser = argparse.ArgumentParser(
+        description="PktLens: Live terminal packet sniffer with stats, alerts, and colored output."
+    )
+    parser.add_argument("-i", "--iface", required=True, help="Interface to sniff (e.g. eth0, lo)")
+    parser.add_argument("-t", "--duration", type=int, default=60, help="Duration in seconds (default: 60)")
+    parser.add_argument("--pcap", default=None, help="Optional output pcap file")
+    parser.add_argument("--window", type=int, default=60, help="Sliding window for alerts (default: 60s)")
+    args = parser.parse_args()
+
+    thresholds = {
+        "window": args.window,
+        "dns_nxdomain": 10,
+        "icmp_flood": 50,
+        "tcp_rst": 30,
+        "tcp_syn": 80
     }
 
-    # Ethernet
-    if pkt.haslayer(Ether):
-        eth = pkt.getlayer(Ether)
-        summary["eth_src"] = eth.src
-        summary["eth_dst"] = eth.dst
-        summary["eth_type"] = int(eth.type)
+    window_data = defaultdict(list)
 
-    # IPv4
-    if pkt.haslayer(IP):
-        ip = pkt.getlayer(IP)
-        summary["ip_version"] = 4
-        summary["ip_src"] = ip.src
-        summary["ip_dst"] = ip.dst
-        # TCP
-        if pkt.haslayer(TCP):
-            summary["protocol"] = "TCP"
-            tcp = pkt.getlayer(TCP)
-            summary["src_port"] = int(tcp.sport)
-            summary["dst_port"] = int(tcp.dport)
-            summary["tcp_flags"] = tcp_flags_to_str(tcp)
-            if pkt.haslayer(Raw):
-                raw = pkt.getlayer(Raw).load
-                summary["payload_len"] = len(raw)
-                # crude HTTP detection
-                try:
-                    text = raw.decode("utf-8", errors="ignore")
-                    first_line = text.splitlines()[0].strip() if text.splitlines() else ""
-                    if first_line.startswith(("GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH")):
-                        summary["http"] = {"type": "request", "line": first_line}
-                    elif first_line.startswith("HTTP/"):
-                        summary["http"] = {"type": "response", "line": first_line}
-                except Exception:
-                    pass
-        # UDP
-        elif pkt.haslayer(UDP):
-            summary["protocol"] = "UDP"
-            udp = pkt.getlayer(UDP)
-            summary["src_port"] = int(udp.sport)
-            summary["dst_port"] = int(udp.dport)
-            if pkt.haslayer(Raw):
-                raw = pkt.getlayer(Raw).load
-                summary["payload_len"] = len(raw)
-        elif pkt.haslayer(ICMP):
-            summary["protocol"] = "ICMP"
-            icmp = pkt.getlayer(ICMP)
-            summary["payload_len"] = len(icmp.payload)
-        else:
-            summary["protocol"] = f"IP_PROTO_{ip.proto}"
-    # IPv6
-    elif pkt.haslayer(IPv6):
-        ip6 = pkt.getlayer(IPv6)
-        summary["ip_version"] = 6
-        summary["ip_src"] = ip6.src
-        summary["ip_dst"] = ip6.dst
-        if pkt.haslayer(TCP):
-            summary["protocol"] = "TCP"
-            tcp = pkt.getlayer(TCP)
-            summary["src_port"] = int(tcp.sport)
-            summary["dst_port"] = int(tcp.dport)
-            summary["tcp_flags"] = tcp_flags_to_str(tcp)
-        elif pkt.haslayer(UDP):
-            summary["protocol"] = "UDP"
-            udp = pkt.getlayer(UDP)
-            summary["src_port"] = int(udp.sport)
-            summary["dst_port"] = int(udp.dport)
-    else:
-        # Non-IP frames (ARPs etc.)
-        if pkt.haslayer(Raw):
-            summary["protocol"] = "RAW"
-            summary["payload_len"] = len(pkt.getlayer(Raw).load)
-        else:
-            summary["protocol"] = pkt.summary()
+    def pkt_callback(pkt):
+        process_packet(pkt, window_data, thresholds)
 
-    return summary
+    with Live(refresh_per_second=4, console=console, screen=True):
+        sniff(iface=args.iface, prn=pkt_callback, store=False, timeout=args.duration)
 
-def human_summary(s: Dict[str, Any]) -> str:
-    proto = s.get("protocol", "UNKNOWN")
-    src = f"{s.get('ip_src') or s.get('eth_src') or '?'}:{s.get('src_port') or ''}".rstrip(":")
-    dst = f"{s.get('ip_dst') or s.get('eth_dst') or '?'}:{s.get('dst_port') or ''}".rstrip(":")
-    parts = [f"[{s.get('timestamp')}] {proto} {src} -> {dst} len={s.get('payload_len',0)}"]
-    if s.get("tcp_flags"):
-        parts.append(f"flags={s.get('tcp_flags')}")
-    if s.get("http"):
-        parts.append(f"HTTP: {s['http'].get('line')}")
-    return " | ".join(parts)
+        stats_panel, alerts_panel, pkt_table = render_layout()
+        console.print(stats_panel)
+        console.print(alerts_panel)
+        console.print(pkt_table)
 
-# ---------- Main ----------
-def main():
-    global STOP, PACKETS_WRITTEN, START_TIME
-
-    ap = argparse.ArgumentParser(prog="PktLens", description="PktLens - lightweight packet sniffer")
-    ap.add_argument("--iface", "-i", help="Interface to sniff (default: scapy default, use 'lo' for loopback)", default=None)
-    ap.add_argument("--filter", "-f", help="BPF filter string (e.g. 'tcp and port 80')", default=None)
-    ap.add_argument("--count", "-c", type=int, help="Stop after this many packets written (0 = no limit)", default=0)
-    ap.add_argument("--duration", "-t", type=int, help="Duration in seconds to run capture (0 = no limit)", default=0)
-    ap.add_argument("--pcap", help="Write streaming pcap to this file (optional)", default=None)
-    ap.add_argument("--jsonl", help="Write JSONL packet summaries to this file (optional)", default=None)
-    ap.add_argument("--pretty", action="store_true", help="Print human-readable summaries to stdout")
-    ap.add_argument("--log", help="Log file (rotating)", default="pktlens.log")
-    args = ap.parse_args()
-
-    # Logging
-    logger = logging.getLogger()
-    logger.setLevel(logging.INFO)
-    rh = logging.handlers.RotatingFileHandler(args.log, maxBytes=5*1024*1024, backupCount=2)
-    rh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-    logger.addHandler(rh)
-
-    # Check privileges early
-    try:
-        # minimal check: attempt to open a pcap writer if requested
-        if args.pcap:
-            Path(args.pcap).parent.mkdir(parents=True, exist_ok=True)
-    except PermissionError:
-        print("Permission error: run this script with root/administrator privileges.", file=sys.stderr)
-        sys.exit(2)
-
-    pcap_writer: Optional[PcapWriter] = None
-    if args.pcap:
-        # appendable pcap writer (streaming)
-        pcap_writer = PcapWriter(args.pcap, append=True, sync=True)
-        logging.info("PcapWriter opened: %s", args.pcap)
-
-    jsonl_fp = None
-    if args.jsonl:
-        Path(args.jsonl).parent.mkdir(parents=True, exist_ok=True)
-        jsonl_fp = open(args.jsonl, "a", encoding="utf-8")
-        logging.info("JSONL output: %s", args.jsonl)
-
-    START_TIME = time.time()
-    logging.info("Starting PktLens capture (iface=%s filter=%s count=%s duration=%s)",
-                 args.iface, args.filter, args.count, args.duration)
-
-    # callback and stop_filter
-    def on_pkt(pkt):
-        nonlocal pcap_writer, jsonl_fp, args
-        global PACKETS_WRITTEN
-
-        # parse
-        s = parse_pkt(pkt)
-
-        # write jsonl
-        if jsonl_fp:
-            jsonl_fp.write(json.dumps(s, ensure_ascii=False) + "\n")
-            jsonl_fp.flush()
-
-        # print human summary
-        if args.pretty:
-            print(human_summary(s))
-
-        # write to pcap (streaming)
-        if pcap_writer:
-            try:
-                pcap_writer.write(pkt)
-            except Exception as e:
-                logging.exception("Failed writing packet to pcap: %s", e)
-
-        PACKETS_WRITTEN += 1
-        logging.info("Packet captured: proto=%s src=%s dst=%s",
-                     s.get("protocol"), s.get("ip_src") or s.get("eth_src"), s.get("ip_dst") or s.get("eth_dst"))
-
-    def stop_filter(pkt):
-        # Called for every packet; returning True stops sniff
-        if STOP:
-            return True
-        if args.count and PACKETS_WRITTEN >= args.count:
-            logging.info("Reached packet count limit: %d", PACKETS_WRITTEN)
-            return True
-        if args.duration and (time.time() - START_TIME) >= args.duration:
-            logging.info("Reached duration limit: %ds", args.duration)
-            return True
-        return False
-
-    # Run sniff
-    try:
-        sniff_kwargs = {
-            "prn": on_pkt,
-            "store": False,
-            "stop_filter": stop_filter,
-        }
-        if args.iface:
-            sniff_kwargs["iface"] = args.iface
-        if args.filter:
-            sniff_kwargs["filter"] = args.filter
-
-        sniff(**sniff_kwargs)
-
-    except PermissionError:
-        print("Permission denied. Run with root/administrator privileges (sudo).", file=sys.stderr)
-        logging.exception("Permission denied while sniffing")
-        sys.exit(2)
-    except Exception as e:
-        logging.exception("Exception during sniff: %s", e)
-        print("Error during sniff:", e, file=sys.stderr)
-    finally:
-        if jsonl_fp:
-            jsonl_fp.close()
-        if pcap_writer:
-            pcap_writer.close()
-        logging.info("PktLens finished. Packets written: %d", PACKETS_WRITTEN)
-        if args.pretty:
-            print(f"PktLens finished. Packets captured: {PACKETS_WRITTEN}")
 
 if __name__ == "__main__":
     main()
