@@ -1,179 +1,156 @@
 #!/usr/bin/env python3
-# pktlens.py
-# Live packet sniffer with stats, alerts, and recent packets (Bettercap-style)
+# pktlens.py - PktLens Advanced Packet Sniffer Dashboard
 
 import argparse
-from collections import defaultdict, deque
-from datetime import datetime
-import time
+import socket
+from collections import defaultdict, Counter
+from datetime import datetime, timedelta
 from scapy.all import sniff, IP, TCP, UDP, ICMP, DNS
 from rich.console import Console
 from rich.table import Table
-from rich.live import Live
 from rich.panel import Panel
-from rich.text import Text
+from rich.live import Live
+from rich.layout import Layout
 
 console = Console()
 
-# Store packets and metrics
-stats = defaultdict(int)
-recent_packets = deque(maxlen=15)
-alerts = deque(maxlen=5)
-unique_src = set()
-unique_dst = set()
-start_time = time.time()
+# Cache for hostname resolution
+ip_hostname_cache = {}
 
+def resolve_ip(ip):
+    if ip in ip_hostname_cache:
+        return ip_hostname_cache[ip]
+    try:
+        hostname = socket.gethostbyaddr(ip)[0]
+    except Exception:
+        hostname = None
+    ip_hostname_cache[ip] = hostname
+    return hostname
 
-# ---------- ALERT RULES ----------
-def check_alerts(pkt, window_data, thresholds):
-    now = time.time()
-    src_ip = pkt[IP].src if IP in pkt else None
+# Stats & tracking
+stats = {"TCP":0, "UDP":0, "ICMP":0, "Total":0, "Throughput":0}
+recent_packets = []
+MAX_RECENT = 15  # show last 15 packets
+top_talkers = Counter()
+top_domains = Counter()
+dns_queries = defaultdict(list)
+alerts = []
 
-    # Clean old entries (sliding window)
-    for k, times in list(window_data.items()):
-        window_data[k] = [t for t in times if now - t <= thresholds["window"]]
+# Thresholds for alerts
+NXDOMAIN_THRESHOLD = 10  # NXDOMAIN queries in time window
+TIME_WINDOW = 60  # seconds
 
-    # DNS NXDOMAIN (rcode=3)
-    if pkt.haslayer(DNS) and pkt[DNS].qr == 1 and pkt[DNS].rcode == 3:
-        window_data[f"dns_nxdomain:{src_ip}"].append(now)
-        if len(window_data[f"dns_nxdomain:{src_ip}"]) >= thresholds["dns_nxdomain"]:
-            alerts.append(("[red bold][HIGH][/red bold] DNS NXDOMAIN Spike",
-                           f"Source: {src_ip}\nCount: {len(window_data[f'dns_nxdomain:{src_ip}'])} NXDOMAIN in last {thresholds['window']}s\nAction: Check misconfig or suspicious domains"))
-
-    # ICMP flood
-    if pkt.haslayer(ICMP) and pkt[ICMP].type == 8:  # echo-request
-        window_data[f"icmp_flood:{src_ip}"].append(now)
-        if len(window_data[f"icmp_flood:{src_ip}"]) >= thresholds["icmp_flood"]:
-            alerts.append(("[yellow][MEDIUM][/yellow] ICMP Flood Attempt",
-                           f"Source: {src_ip}\nPackets in last {thresholds['window']}s: {len(window_data[f'icmp_flood:{src_ip}'])}\nAction: Investigate DoS attempt"))
-
-    # TCP RST spike
-    if pkt.haslayer(TCP) and pkt[TCP].flags == "R":
-        window_data[f"tcp_rst:{src_ip}"].append(now)
-        if len(window_data[f"tcp_rst:{src_ip}"]) >= thresholds["tcp_rst"]:
-            alerts.append(("[yellow][MEDIUM][/yellow] TCP Reset Spike",
-                           f"Source: {src_ip}\nCount: {len(window_data[f'tcp_rst:{src_ip}'])}\nAction: Possible scan or broken sessions"))
-
-    # SYN flood detection
-    if pkt.haslayer(TCP) and pkt[TCP].flags == "S":
-        window_data[f"tcp_syn:{src_ip}"].append(now)
-        if len(window_data[f"tcp_syn:{src_ip}"]) >= thresholds["tcp_syn"]:
-            alerts.append(("[red bold][HIGH][/red bold] SYN Flood Suspicion",
-                           f"Source: {src_ip}\nSYN packets in last {thresholds['window']}s: {len(window_data[f'tcp_syn:{src_ip}'])}\nAction: Check for flood attack"))
-
-
-# ---------- PACKET HANDLER ----------
-def process_packet(pkt, window_data, thresholds):
-    global stats, recent_packets, unique_src, unique_dst
-
-    stats["total"] += 1
+def packet_handler(pkt):
     proto = "OTHER"
-
+    src = dst = ""
+    length = len(pkt)
+    
     if IP in pkt:
-        src, dst = pkt[IP].src, pkt[IP].dst
-        unique_src.add(src)
-        unique_dst.add(dst)
-    else:
-        src, dst = "-", "-"
+        ip_layer = pkt[IP]
+        src_ip = ip_layer.src
+        dst_ip = ip_layer.dst
+        src_name = resolve_ip(src_ip) or src_ip
+        dst_name = resolve_ip(dst_ip) or dst_ip
+        src = f"{src_ip} ({src_name})"
+        dst = f"{dst_ip} ({dst_name})"
 
-    if TCP in pkt:
-        proto = "TCP"
-        stats["tcp"] += 1
-    elif UDP in pkt:
-        proto = "UDP"
-        stats["udp"] += 1
-    elif ICMP in pkt:
-        proto = "ICMP"
-        stats["icmp"] += 1
+        if TCP in pkt:
+            proto = "TCP"
+            stats["TCP"] += 1
+        elif UDP in pkt:
+            proto = "UDP"
+            stats["UDP"] += 1
+            if DNS in pkt:
+                proto = "DNS"
+                dns_layer = pkt[DNS]
+                if hasattr(dns_layer, "qd") and dns_layer.qd is not None:
+                    qname = str(dns_layer.qd.qname.decode()).rstrip('.')
+                    top_domains[qname] += 1
+                    dns_queries[src_ip].append(datetime.now())
+                    # check NXDOMAIN alert
+                    dns_rcode = pkt[DNS].rcode
+                    if dns_rcode == 3:  # NXDOMAIN
+                        # remove old timestamps
+                        dns_queries[src_ip] = [t for t in dns_queries[src_ip] if (datetime.now()-t).seconds <= TIME_WINDOW]
+                        if len(dns_queries[src_ip]) >= NXDOMAIN_THRESHOLD:
+                            alerts.append(f"[ALERT][DNS NXDOMAIN] {src_ip} had {len(dns_queries[src_ip])} NXDOMAINs in {TIME_WINDOW}s")
+        elif ICMP in pkt:
+            proto = "ICMP"
+            stats["ICMP"] += 1
     else:
-        stats["other"] += 1
+        src = "N/A"
+        dst = "N/A"
 
-    # store packet in recent
-    recent_packets.appendleft({
+    stats["Total"] += 1
+    stats["Throughput"] += length  # bytes
+
+    top_talkers[src_ip] += 1
+
+    # Recent packets
+    recent_packets.append({
         "time": datetime.now().strftime("%H:%M:%S.%f")[:-3],
         "proto": proto,
         "src": src,
         "dst": dst,
-        "len": len(pkt)
+        "len": length
     })
+    if len(recent_packets) > MAX_RECENT:
+        recent_packets.pop(0)
 
-    # run alerts
-    check_alerts(pkt, window_data, thresholds)
-
-
-# ---------- RENDERING ----------
-def render_layout():
+def render_dashboard():
+    throughput_mbps = round(stats["Throughput"]*8/1_000_000, 2)
     # Stats Panel
-    elapsed = time.time() - start_time
-    throughput = (stats["total"] * 64 * 8 / elapsed / 1e6) if elapsed > 0 else 0
-    stats_text = Text()
-    stats_text.append(f"Total Packets: {stats['total']}\n", style="bold cyan")
-    stats_text.append(f"TCP: {stats['tcp']} | UDP: {stats['udp']} | ICMP: {stats['icmp']} | Other: {stats['other']}\n", style="green")
-    stats_text.append(f"Throughput: {throughput:.2f} Mbps\n", style="yellow")
-    stats_text.append(f"Unique Sources: {len(unique_src)} | Unique Destinations: {len(unique_dst)}", style="magenta")
-    stats_panel = Panel(stats_text, title="Stats", border_style="cyan")
-
-    # Alerts Panel
-    if alerts:
-        alert_text = Text()
-        for title, detail in list(alerts)[-3:]:
-            alert_text.append(f"{title}\n", style="bold")
-            alert_text.append(f"  {detail}\n\n", style="white")
-        alerts_panel = Panel(alert_text, title="Alerts", border_style="red")
-    else:
-        alerts_panel = Panel(Text("No active alerts", style="green"), title="Alerts", border_style="red")
-
-    # Recent Packets Table
-    pkt_table = Table(title="Recent Packets", expand=True, box=None, show_lines=True)
-    pkt_table.add_column("Time", style="cyan")
-    pkt_table.add_column("Proto")
-    pkt_table.add_column("Source")
-    pkt_table.add_column("Destination")
-    pkt_table.add_column("Len", justify="right")
-
-    proto_colors = {"TCP": "blue", "UDP": "cyan", "ICMP": "yellow", "DNS": "green", "TLS": "magenta"}
-
-    for pkt in list(recent_packets):
-        proto_style = proto_colors.get(pkt["proto"], "white")
-        pkt_table.add_row(pkt["time"],
-                          f"[{proto_style}]{pkt['proto']}[/{proto_style}]",
-                          pkt["src"], pkt["dst"], str(pkt["len"]))
-
-    return Panel(stats_panel.renderable, title="PktLens", border_style="bright_white"), alerts_panel, pkt_table
-
-
-# ---------- MAIN ----------
-def main():
-    parser = argparse.ArgumentParser(
-        description="PktLens: Live terminal packet sniffer with stats, alerts, and colored output."
+    top_talkers_list = ", ".join([f"{ip}" for ip, _ in top_talkers.most_common(5)])
+    top_domains_list = ", ".join([f"{domain}" for domain, _ in top_domains.most_common(5)])
+    stats_panel = Panel(
+        f"Total Packets: {stats['Total']}\n"
+        f"TCP: {stats['TCP']} | UDP: {stats['UDP']} | ICMP: {stats['ICMP']}\n"
+        f"Throughput: {throughput_mbps} Mbps\n"
+        f"Top Talkers: {top_talkers_list}\n"
+        f"Top Domains: {top_domains_list}",
+        title="Stats",
+        border_style="green"
     )
-    parser.add_argument("-i", "--iface", required=True, help="Interface to sniff (e.g. eth0, lo)")
-    parser.add_argument("-t", "--duration", type=int, default=60, help="Duration in seconds (default: 60)")
-    parser.add_argument("--pcap", default=None, help="Optional output pcap file")
-    parser.add_argument("--window", type=int, default=60, help="Sliding window for alerts (default: 60s)")
+    # Alerts Panel
+    alerts_panel = Panel("\n".join(alerts[-5:]) if alerts else "No Alerts", title="Alerts", border_style="red")
+    # Recent Packets Table
+    table = Table(title="Recent Packets", expand=True)
+    table.add_column("Time", justify="center")
+    table.add_column("Proto", justify="center")
+    table.add_column("Source", justify="left")
+    table.add_column("Destination", justify="left")
+    table.add_column("Len", justify="right")
+    for pkt in recent_packets:
+        table.add_row(pkt["time"], pkt["proto"], pkt["src"], pkt["dst"], str(pkt["len"]))
+    return stats_panel, alerts_panel, table
+
+def main():
+    parser = argparse.ArgumentParser(description="PktLens - Advanced Packet Sniffer")
+    parser.add_argument("--interface", "-i", default=None, help="Network interface to sniff")
+    parser.add_argument("--minimum", action="store_true", help="Minimal mode")
+    parser.add_argument("--full", action="store_true", help="Full mode")
     args = parser.parse_args()
 
-    thresholds = {
-        "window": args.window,
-        "dns_nxdomain": 10,
-        "icmp_flood": 50,
-        "tcp_rst": 30,
-        "tcp_syn": 80
-    }
+    console.print("[bold green]Starting PktLens... Press Ctrl+C to stop[/bold green]")
 
-    window_data = defaultdict(list)
-
-    def pkt_callback(pkt):
-        process_packet(pkt, window_data, thresholds)
-
-    with Live(refresh_per_second=4, console=console, screen=True):
-        sniff(iface=args.iface, prn=pkt_callback, store=False, timeout=args.duration)
-
-        stats_panel, alerts_panel, pkt_table = render_layout()
-        console.print(stats_panel)
-        console.print(alerts_panel)
-        console.print(pkt_table)
-
+    try:
+        with Live(refresh_per_second=2) as live:
+            def update_live(pkt):
+                packet_handler(pkt)
+                stats_panel, alerts_panel, table = render_dashboard()
+                if args.minimum:
+                    live.update(stats_panel)
+                else:
+                    layout = Layout()
+                    layout.split_column(
+                        Layout(stats_panel, size=8),
+                        Layout(alerts_panel, size=6),
+                        Layout(table)
+                    )
+                    live.update(layout)
+            sniff(prn=update_live, iface=args.interface, store=False)
+    except KeyboardInterrupt:
+        console.print("\n[bold yellow]Stopping PktLens...[/bold yellow]")
 
 if __name__ == "__main__":
     main()
