@@ -118,5 +118,6 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE) for detai
 ## Author
 
 Ajoy A G – Cybersecurity Enthusiast & Developer
+
 LinkedIn: [https://www.linkedin.com/in/ajoyag](https://www.linkedin.com/in/ajoyag)
 
