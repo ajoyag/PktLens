@@ -1,115 +1,122 @@
-# PktLens
+# PktLens - Advanced Packet Sniffer Dashboard
 
-A lightweight packet sniffer built in Python with [Scapy](https://scapy.net/).  
-PktLens captures live network traffic, writes PCAPs for deep analysis, logs structured JSON for automation, and provides human-readable summaries in real time.
+PktLens is a terminal-based, live-updating packet sniffer designed for **network monitoring, analysis, and security research**. It captures packets, displays real-time statistics, recent traffic, top talkers, domains, and generates alerts for suspicious activity.
+
+This project is ideal for cybersecurity enthusiasts, penetration testers, and anyone learning network traffic analysis.
+
+---
 
 ## Features
 
-- 🔎 Live packet capture from any interface
-- 📂 Save packets directly to PCAP (Wireshark compatible)
-- 📜 Stream structured logs in JSONL format
-- 👀 Human-readable per-packet summaries (protocols, ports, flags, HTTP requests)
-- ⏱️ Flexible stopping conditions: packet count, duration, or Ctrl+C
-- 📑 Rotating log file for capture history
-- 🛡️ Works on Linux/macOS (requires root privileges for sniffing)
+- Live dashboard with **Stats, Alerts, and Recent Packets**.
+- Displays **IP addresses along with hostnames/domains**.
+- Tracks **protocol distribution, throughput, top talkers, top domains**.
+- Generates **dynamic alerts** (e.g., NXDOMAIN spikes, unusual packet behavior).
+- Supports **minimal mode** (`--minimum`) for quick stats.
+- Supports **full mode** (`--full`) for detailed analysis.
+- Terminal-based, clean, and user-friendly interface using **Rich**.
 
 ---
 
 ## Installation
 
-Clone the repo and install dependencies:
-
+### 1. Clone the Repository
 ```bash
-git clone https://github.com/your-username/PktLens.git
+git clone https://github.com/YourUsername/PktLens.git
 cd PktLens
-pip3 install -r requirements.txt
 ````
 
-Or install Scapy directly:
+### 2. Install Dependencies
+
+Make sure you have Python 3.8+ installed.
 
 ```bash
-pip3 install scapy
+pip install -r requirements.txt
+```
+
+`requirements.txt` includes:
+
+```
+scapy
+rich
 ```
 
 ---
 
 ## Usage
 
-Run PktLens with root privileges:
+### Minimal Mode (Stats Only)
 
 ```bash
-sudo python3 pktlens.py --iface lo --duration 15 --pretty --pcap demo.pcap --jsonl demo.jsonl
+sudo python3 pktlens.py --minimum -i eth0
 ```
 
-### Common options
+### Full Mode (Stats + Alerts + Recent Packets)
 
-* `--iface` / `-i` : Interface to sniff (e.g. `eth0`, `wlan0`, `lo`)
-* `--filter` / `-f` : BPF filter string (e.g. `"tcp and port 80"`)
-* `--count` / `-c` : Stop after this many packets
-* `--duration` / `-t` : Stop after this many seconds
-* `--pcap` : Write packets to a `.pcap` file
-* `--jsonl` : Write packet summaries to JSONL
-* `--pretty` : Print human summaries to stdout
+```bash
+sudo python3 pktlens.py --full -i eth0
+```
+
+### Help
+
+```bash
+python3 pktlens.py -h
+```
 
 ---
 
-## Example
-
-Start a capture on the loopback interface:
-
-```bash
-sudo python3 pktlens.py --iface lo --duration 20 --pretty --pcap traffic.pcap --jsonl traffic.jsonl
-```
-
-In another terminal:
-
-```bash
-python3 -m http.server 8000 &
-curl http://localhost:8000
-ping -c 3 8.8.8.8
-```
-
-You’ll see console output like:
+## Sample Output (Full Mode)
 
 ```
-[2025-09-30T12:01:15Z] TCP 127.0.0.1:39812 -> 127.0.0.1:8000 len=64 | flags=S
-[2025-09-30T12:01:15Z] HTTP: GET / HTTP/1.1
-[2025-09-30T12:01:17Z] ICMP 127.0.0.1 -> 8.8.8.8 len=32
+╔════════════════════════════════════╗
+║              Stats                 ║
+╠════════════════════════════════════╣
+║ Total Packets: 347                 ║
+║ TCP: 218 | UDP: 92 | ICMP: 37      ║
+║ Throughput: 1.9 Mbps               ║
+║ Top Talkers: 192.168.0.101, 192.168.0.102 ║
+║ Top Domains: google.com, youtube.com, example.com ║
+╚════════════════════════════════════╝
+
+╔════════════════════════════════════════════════════════════╗
+║                         Alerts                               ║
+╠════════════════════════════════════════════════════════════╣
+║ [ALERT][DNS NXDOMAIN] 192.168.0.5 had 12 NXDOMAINs in 60s  ║
+║ [ALERT][TCP RST] 192.168.0.10 sent 10 RST packets          ║
+╚════════════════════════════════════════════════════════════╝
+
+╔═════════════╦═══════╦════════════════════════════════╦══════════════════════════════╦═════╗
+║ Time        ║ Proto ║ Source                         ║ Destination                  ║ Len ║
+╠═════════════╬═══════╬════════════════════════════════╬══════════════════════════════╬═════╣
+║ 12:01:15.123║ TCP   ║ 192.168.0.101 (Laptop-A)       ║ 142.250.185.14 (google.com)  ║ 64  ║
+║ 12:01:15.124║ TLS   ║ 192.168.0.101 (Laptop-A)       ║ 142.250.185.14 (google.com)  ║ 512 ║
+║ 12:01:15.200║ HTTP  ║ 10.0.0.12 (Workstation-12)    ║ 127.0.0.1 (localhost)        ║ 128 ║
+║ 12:01:16.001║ DNS   ║ 192.168.0.5 (Device-5)        ║ 8.8.8.8 (dns.google)         ║ 48  ║
+╚═════════════╩═══════╩════════════════════════════════╩══════════════════════════════╩═════╝
 ```
 
-Open `traffic.pcap` in Wireshark for full inspection, or process `traffic.jsonl` in any script.
+> Note: The recent packets table scrolls dynamically as new packets arrive, while stats and alerts remain fixed.
 
 ---
 
-## Requirements
+## Contributing
 
-* Python 3.8+
-* [Scapy](https://scapy.net/)
-  Install via `pip3 install scapy`
-
----
-
-## Project Structure
-
-```
-PktLens/
-├── pktlens.py          # Main sniffer script
-├── requirements.txt    # Python dependencies
-├── README.md           # Documentation
-├── LICENSE             # License (MIT, Apache 2.0, etc.)
-├── data/               # Optional sample PCAPs
-└── docs/               # Screenshots, extra docs
-```
+1. Fork the repository.
+2. Create your feature branch: `git checkout -b feature/MyFeature`
+3. Commit your changes: `git commit -am 'Add feature'`
+4. Push to the branch: `git push origin feature/MyFeature`
+5. Open a Pull Request.
 
 ---
 
 ## License
 
-MIT License — free to use, modify, and share. See [LICENSE](./LICENSE) for details.
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
 
 ---
 
-## Disclaimer
+## Author
 
-PktLens is intended for **educational and authorized security testing only**.
-Do not use it on networks you don’t own or have explicit permission to monitor.
+Ajoy A G – Cybersecurity Enthusiast & Developer
+LinkedIn: [https://www.linkedin.com/in/ajoyag](https://www.linkedin.com/in/ajoyag)
+
